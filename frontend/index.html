@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Instagram Publisher</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;max-width:900px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    button{padding:10px 14px;border:0;border-radius:10px;background:#111;color:#fff;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    input,textarea{width:100%;padding:10px;border-radius:10px;border:1px solid #ddd}
+    .card{border:1px solid #eee;border-radius:14px;padding:14px;margin-top:12px}
+    .muted{color:#666}
+    .ok{color:#0a7a2f}
+    .err{color:#b00020}
+    .grid{display:grid;grid-template-columns:1fr;gap:10px}
+    @media(min-width:800px){.grid{grid-template-columns:1fr 1fr}}
+    a{color:#0b57d0}
+    code{background:#f6f6f6;padding:2px 6px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <h1>Publier des vidéos sur Instagram (via API)</h1>
+  <p class="muted">
+    Frontend hébergé sur GitHub Pages + backend (Worker) pour OAuth et publication.
+  </p>
+
+  <div class="card">
+    <div class="row">
+      <button id="btnLogin">1) Connecter Instagram</button>
+      <button id="btnLogout">Se déconnecter</button>
+    </div>
+    <p id="authState" class="muted">Non connecté.</p>
+    <p class="muted">
+      Backend Worker : <code id="workerUrlLabel"></code>
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>2) Choisir des vidéos</h2>
+    <p class="muted">
+      Important : le prototype publie à partir d’URLs publiques (<code>video_url</code>).
+      Héberge tes MP4 quelque part (Cloudflare R2, S3, serveur, etc.).
+    </p>
+
+    <div class="grid" id="videoList"></div>
+
+    <h3>Légende (caption)</h3>
+    <textarea id="caption" rows="3" placeholder="Texte de la publication..."></textarea>
+
+    <div class="row" style="margin-top:12px">
+      <button id="btnPublish" disabled>3) Publier la sélection</button>
+    </div>
+
+    <p id="result" class="muted"></p>
+  </div>
+
+<script>
+  // ✅ Mets l’URL de ton Cloudflare Worker ici
+  const WORKER_URL = "https://TON-WORKER.example.workers.dev";
+
+  // Liste de vidéos proposées (tu peux la charger depuis un JSON ou ta DB si tu veux)
+  const VIDEOS = [
+    { id: "v1", title: "Vidéo 1 (MP4 URL)", url: "https://example.com/video1.mp4" },
+    { id: "v2", title: "Vidéo 2 (MP4 URL)", url: "https://example.com/video2.mp4" },
+    { id: "v3", title: "Vidéo 3 (MP4 URL)", url: "https://example.com/video3.mp4" }
+  ];
+
+  document.getElementById("workerUrlLabel").textContent = WORKER_URL;
+
+  function parseHash() {
+    // Le Worker renvoie #access_token=...&ig_id=...
+    const h = new URLSearchParams(location.hash.replace(/^#/, ""));
+    return {
+      access_token: h.get("access_token") || localStorage.getItem("access_token"),
+      ig_id: h.get("ig_id") || localStorage.getItem("ig_id")
+    };
+  }
+
+  function setAuth(access_token, ig_id) {
+    if (access_token) localStorage.setItem("access_token", access_token);
+    if (ig_id) localStorage.setItem("ig_id", ig_id);
+    // Nettoyer le hash
+    history.replaceState({}, document.title, location.pathname + location.search);
+  }
+
+  function clearAuth() {
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("ig_id");
+  }
+
+  function renderVideos() {
+    const wrap = document.getElementById("videoList");
+    wrap.innerHTML = "";
+    for (const v of VIDEOS) {
+      const el = document.createElement("div");
+      el.className = "card";
+      el.innerHTML = `
+        <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer">
+          <input type="checkbox" data-id="${v.id}" style="margin-top:4px">
+          <div>
+            <div><strong>${v.title}</strong></div>
+            <div class="muted" style="word-break:break-all">${v.url}</div>
+          </div>
+        </label>
+      `;
+      wrap.appendChild(el);
+    }
+  }
+
+  function getSelectedVideos() {
+    const checked = [...document.querySelectorAll('input[type="checkbox"][data-id]:checked')];
+    const ids = checked.map(x => x.getAttribute("data-id"));
+    return VIDEOS.filter(v => ids.includes(v.id));
+  }
+
+  function refreshUI() {
+    const { access_token, ig_id } = parseHash();
+    if (access_token && ig_id && (location.hash.includes("access_token") || location.hash.includes("ig_id"))) {
+      setAuth(access_token, ig_id);
+    }
+
+    const token = localStorage.getItem("access_token");
+    const ig = localStorage.getItem("ig_id");
+
+    const authState = document.getElementById("authState");
+    const btnPublish = document.getElementById("btnPublish");
+
+    if (token && ig) {
+      authState.innerHTML = `Connecté ✅ <br><span class="muted">ig_id:</span> <code>${ig}</code>`;
+      btnPublish.disabled = false;
+    } else {
+      authState.textContent = "Non connecté.";
+      btnPublish.disabled = true;
+    }
+  }
+
+  document.getElementById("btnLogin").addEventListener("click", () => {
+    // Démarre OAuth sur le Worker, puis redirige vers Meta
+    window.location.href = `${WORKER_URL}/auth/start?return_to=${encodeURIComponent(window.location.origin + window.location.pathname)}`;
+  });
+
+  document.getElementById("btnLogout").addEventListener("click", () => {
+    clearAuth();
+    refreshUI();
+    document.getElementById("result").textContent = "Déconnecté.";
+  });
+
+  document.getElementById("btnPublish").addEventListener("click", async () => {
+    const token = localStorage.getItem("access_token");
+    const ig_id = localStorage.getItem("ig_id");
+    const caption = document.getElementById("caption").value || "";
+
+    const selected = getSelectedVideos();
+    const result = document.getElementById("result");
+    result.textContent = "";
+
+    if (!selected.length) {
+      result.innerHTML = `<span class="err">Choisis au moins une vidéo.</span>`;
+      return;
+    }
+
+    result.textContent = "Publication en cours…";
+
+    try {
+      const out = [];
+      for (const v of selected) {
+        const r = await fetch(`${WORKER_URL}/publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            access_token: token,
+            ig_id,
+            video_url: v.url,
+            caption
+          })
+        });
+
+        const data = await r.json();
+        if (!r.ok) throw new Error(data?.error?.message || JSON.stringify(data));
+
+        out.push(`✅ ${v.title} → media_id: ${data.media_id}`);
+      }
+
+      result.innerHTML = `<div class="ok">${out.join("<br>")}</div>`;
+    } catch (e) {
+      result.innerHTML = `<span class="err">Erreur: ${String(e.message || e)}</span>`;
+    }
+  });
+
+  renderVideos();
+  refreshUI();
+  // Activer/désactiver Publish selon sélection
+  document.addEventListener("change", () => {
+    const token = localStorage.getItem("access_token");
+    const ig = localStorage.getItem("ig_id");
+    document.getElementById("btnPublish").disabled = !(token && ig);
+  });
+</script>
+</body>
+</html>
+
